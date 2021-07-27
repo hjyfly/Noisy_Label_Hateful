@@ -91,7 +91,7 @@ if __name__ == '__main__':
     def preprocess_function(examples):
         target = ((examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key]))
         
-        result = tokenizer(*target, padding=True, max_length=max_sequence_length, truncation=True)
+        result = tokenizer(*target, padding=True, max_length=max_sequence_length, truncation=True,is_split_into_words=True)
 
         return result
 

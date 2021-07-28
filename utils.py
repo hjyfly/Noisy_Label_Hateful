@@ -96,16 +96,19 @@ class CustomTrainer(Trainer):
             if self.args.past_index >= 0:
                 self._past = outputs[self.args.past_index]
                 # outputs 으로부터 logits (예측값 구함)
-        #logits = outputs['logits']
+        logits = outputs['logits']
         # inputs 으로부터 정답을 구함
-        #labels = inputs['label']
+        labels = inputs.get("labels")
 
         # 각 샘플별 로스를 계산
+        CE = nn.CrossEntropyLoss(reduction='none')
+        loss = CE(logits, labels)
+        loss = loss.cpu().detach().numpy
         #loss = labels - logits
-        if labels is not None:
-            loss = self.label_smoother(outputs, labels)
-        else:
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+        #if labels is not None:
+        #    loss = self.label_smoother(outputs, labels)
+        #else:
+        #    loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
         loss = loss.reshape(-1, 1)
         # gmm
         gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)

@@ -103,7 +103,7 @@ class CustomTrainer(Trainer):
         # 각 샘플별 로스를 계산
         CE = nn.CrossEntropyLoss(reduction='none')
         loss = CE(logits, labels)
-        loss = loss.cpu().detach().numpy
+        loss = loss.cpu().detach().numpy()
         #loss = labels - logits
         #if labels is not None:
         #    loss = self.label_smoother(outputs, labels)

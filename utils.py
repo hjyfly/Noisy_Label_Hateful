@@ -106,7 +106,7 @@ class CustomTrainer(Trainer):
             loss = self.label_smoother(outputs, labels)
         else:
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-
+        loss = loss.reshape(-1, 1)
         # gmm
         gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
         gmm.fit(loss)

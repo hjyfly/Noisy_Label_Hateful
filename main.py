@@ -9,14 +9,14 @@ import torch
 from datasets import load_dataset, load_metric
 from transformers import (
     AutoTokenizer,
-    AutoModelForSequenceClassification,
-    EvalPrediction,
+    AutoModelForSequenceClassification, 
+    EvalPrediction, 
     TrainingArguments
 )
 
 from methods.mixup.utils import MixupAutoModelForSequenceClassification, MixupTrainer
 from utils import *
-
+        
 if __name__ == '__main__':
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(0)
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     sentence1_key, sentence2_key = task_to_keys[p_args.dataset]
     max_sequence_length = 128
     label_column_name = "label"
-
+        
     # Load the dataset
     data_dir = f"{p_args.data_dir}/{p_args.dataset}"
     data_files = {"train": [], "valid": [], "test": []}
@@ -69,7 +69,6 @@ if __name__ == '__main__':
     # Load the metric
     metric = load_metric('./metric.py')
 
-
     def compute_metrics(p: EvalPrediction):
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.argmax(preds, axis=1)
@@ -77,7 +76,6 @@ if __name__ == '__main__':
         if len(result) > 1:
             result["combined_score"] = np.mean(list(result.values())).item()
         return result
-
 
     # Load the pre-trained model
     label_list = []
@@ -92,14 +90,12 @@ if __name__ == '__main__':
 
     tokenizer = AutoTokenizer.from_pretrained(f"klue/{p_args.model}")
 
-
     def preprocess_function(examples):
         target = ((examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key]))
-
-        result = tokenizer(*target, padding=True, max_length=max_sequence_length, truncation=True, is_split_into_words=True)
+        
+        result = tokenizer(*target, padding=True, max_length=max_sequence_length, truncation=True)
 
         return result
-
 
     preprocessed_datasets = datasets.map(preprocess_function, batched=True)
 
@@ -110,8 +106,7 @@ if __name__ == '__main__':
     args = TrainingArguments(
         output_dir=p_args.output_dir, evaluation_strategy='epoch', learning_rate=p_args.lr,
         per_device_train_batch_size=p_args.batch_size, per_device_eval_batch_size=p_args.batch_size,
-        num_train_epochs=p_args.total_epochs, weight_decay=p_args.wd, load_best_model_at_end=True,
-        save_strategy='epoch', metric_for_best_model="eval_f1",
+        num_train_epochs=p_args.total_epochs, weight_decay=p_args.wd, load_best_model_at_end=True, save_strategy='epoch',
         warmup_ratio=p_args.wr, seed=p_args.seed, save_total_limit=1,
         logging_strategy="no", label_smoothing_factor=p_args.label_smoothing
     )
@@ -131,11 +126,11 @@ if __name__ == '__main__':
 
     trainer.train()
     trainer.evaluate()
-    predict_result = trainer.predict(test_dataset)
+    trainer.predict(test_dataset)
 
     log_history = trainer.state.log_history
 
-    elapsed_time = (time.time() - start) / 60  # Min.
+    elapsed_time = (time.time() - start) / 60 # Min.
 
     log_dir = os.path.join(p_args.result_dir, p_args.dataset)
 
@@ -164,8 +159,7 @@ if __name__ == '__main__':
         result = {
             'seed': p_args.seed,
             'time': elapsed_time,
-            'train_results': log_history,
-            'test_results': predict_result[2],
+            'results': log_history,
         }
 
         json.dump(result, f, indent=2)

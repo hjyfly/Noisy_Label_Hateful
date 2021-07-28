@@ -119,7 +119,7 @@ class CustomTrainer(Trainer):
         prob = prob[:, gmm.means_.argmin()]
 
         clean_inputs = {}
-        for k, v in inputs.Items():
+        for k, v in inputs.items():
             clean_inputs[k] = v[prob > self.args.p_threshold]
         return clean_inputs
 

@@ -138,7 +138,7 @@ class CustomTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.args.p_threshold < 0:
+        if self.args.p_threshold > 0:
             inputs = self.get_clean(model, inputs)
 
         loss = self.compute_loss(model, inputs)

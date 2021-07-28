@@ -9,11 +9,11 @@ import torch
 import torch.nn as nn
 
 from typing import Optional, Tuple
-
-from sklearn.mixture import GaussianMixture
 from tqdm.auto import tqdm
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from transformers.integrations import hp_params
+
+from sklearn.mixture import GaussianMixture
 
 import math
 import time
@@ -38,18 +38,21 @@ DEFAULT_PROGRESS_CALLBACK = ProgressCallback
 
 logger = logging.get_logger(__name__)
 
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # Multi GPU
+    torch.cuda.manual_seed_all(seed)  # Multi GPU
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
+
 def get_label_list(labels):
     return list(set(labels))
+
 
 def str2bool(i):
     if isinstance(i, bool):
@@ -69,6 +72,7 @@ class CustomTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
+
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -85,38 +89,49 @@ class CustomTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
-    def get_clean(self, model, inputs):
+    def get_loss(self, model, inputs):
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
         with torch.no_grad():
             if self.label_smoother is not None and "labels" in inputs:
                 labels = inputs.pop("labels")
             else:
                 labels = None
-
                 outputs = model(**inputs)
 
             if self.args.past_index >= 0:
                 self._past = outputs[self.args.past_index]
-                # outputs 으로부터 logits (예측값 구함)
-        logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
-        # inputs 으로부터 정답을 구함
-        labels = inputs['labels']
 
-        # 각 샘플별 로스를 계산
+            logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
+            labels = inputs["labels"]
+
+            CE = nn.CrossEntropyLoss(reduction='none')
+            loss = CE(logits, labels).cpu().detach().numpy().reshape(-1, 1)
+
+        return loss
+
+    def get_clean(self, model, inputs):
+
+        with torch.no_grad():
+            if self.label_smoother is not None and "labels" in inputs:
+                labels = inputs.pop("labels")
+            else:
+                labels = None
+                outputs = model(**inputs)
+
+            if self.args.past_index >= 0:
+                self._past = outputs[self.args.past_index]
+
         CE = nn.CrossEntropyLoss(reduction='none')
+        logits = outputs['logits']
+        labels = inputs.get("labels")
         loss = CE(logits, labels)
-        loss = loss.cpu().numpy()
-        #loss = labels - logits
-        #if labels is not None:
-        #    loss = self.label_smoother(outputs, labels)
-        #else:
-        #    loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        loss = loss.reshape(-1, 1)
-        # gmm
-        #gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
-        #gmm.fit(loss)
 
-        # prob
-        prob = self.gmm.predict_proba(loss)
+        input_loss = loss.cpu().detach().numpy()
+        input_loss = input_loss.reshape(-1, 1)
+
+        prob = self.gmm.predict_proba(input_loss)
         prob = prob[:, self.gmm.means_.argmin()]
 
         clean_inputs = {}
@@ -125,31 +140,8 @@ class CustomTrainer(Trainer):
 
         return clean_inputs
 
-    def get_loss(self, model, inputs):
-        with torch.no_grad():
-            if self.label_smoother is not None and "labels" in inputs:
-                labels = inputs.pop("labels")
-            else:
-                labels = None
-
-                outputs = model(**inputs)
-            if self.args.past_index >= 0:
-                self._past = outputs[self.args.past_index]
-                # outputs 으로부터 logits (예측값 구함)
-
-        logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
-        # inputs 으로부터 정답을 구함
-        labels = inputs['labels']
-
-        # 각 샘플별 로스를 계산
-        CE = nn.CrossEntropyLoss(reduction='none')
-        loss = CE(logits, labels)
-        loss = loss.cpu().numpy()
-        loss = loss.reshape(-1, 1)
-
-        return loss
-
-    def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], cur_epoch=-1) -> torch.Tensor:
+    def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]],
+                             cur_epoch=-1) -> torch.Tensor:
         """
         Perform a training step on a batch of inputs.
 
@@ -170,7 +162,7 @@ class CustomTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.args.p_threshold > 0:
+        if self.args.p_threshold > 0 and cur_epoch > 2:
             inputs = self.get_clean(model, inputs)
 
         loss = self.compute_loss(model, inputs)
@@ -184,9 +176,10 @@ class CustomTrainer(Trainer):
         loss.backward()
 
         return loss.detach()
-        
+
     def train(self, resume_from_checkpoint: Optional[Union[str, bool]] = None,
-    trial: Union["optuna.Trial", Dict[str, Any]] = None, ignore_keys_for_eval: Optional[List[str]] = None, **kwargs):
+              trial: Union["optuna.Trial", Dict[str, Any]] = None, ignore_keys_for_eval: Optional[List[str]] = None,
+              **kwargs):
         """
         Main training entry point.
 
@@ -287,10 +280,11 @@ class CustomTrainer(Trainer):
         self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
         # Train!
-        world_size = 1 # number of processes in parallel
+        world_size = 1  # number of processes in parallel
 
         total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * world_size
-        num_examples = (self.num_examples(train_dataloader) if train_dataset_is_sized else total_train_batch_size * args.max_steps)
+        num_examples = (
+            self.num_examples(train_dataloader) if train_dataset_is_sized else total_train_batch_size * args.max_steps)
 
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {num_examples}")
@@ -307,7 +301,8 @@ class CustomTrainer(Trainer):
         steps_trained_progress_bar = None
 
         # Check if continuing training from a checkpoint
-        if resume_from_checkpoint is not None and os.path.isfile(os.path.join(resume_from_checkpoint, "trainer_state.json")):
+        if resume_from_checkpoint is not None and os.path.isfile(
+                os.path.join(resume_from_checkpoint, "trainer_state.json")):
             self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, "trainer_state.json"))
             epochs_trained = self.state.global_step // num_update_steps_per_epoch
             if not args.ignore_data_skip:
@@ -366,13 +361,20 @@ class CustomTrainer(Trainer):
             if args.past_index >= 0:
                 self._past = None
 
-            steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
+            steps_in_epoch = (
+                len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             all_loss = []
             for step, inputs in enumerate(epoch_iterator):
                 loss = self.get_loss(model, inputs)
                 all_loss.append(loss)
+            all_loss = np.concatenate(all_loss, axis=0)
+
+            self.gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
+            self.gmm.fit(all_loss)
+
+            for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -395,9 +397,9 @@ class CustomTrainer(Trainer):
 
                 # Optimizer step for deepspeed must be called on every step regardless of the value of gradient_accumulation_steps
                 if (step + 1) % args.gradient_accumulation_steps == 0 or (
-                    # last step in epoch but step is always smaller than gradient_accumulation_steps
-                    steps_in_epoch <= args.gradient_accumulation_steps
-                    and (step + 1) == steps_in_epoch
+                        # last step in epoch but step is always smaller than gradient_accumulation_steps
+                        steps_in_epoch <= args.gradient_accumulation_steps
+                        and (step + 1) == steps_in_epoch
                 ):
                     # Gradient clipping
                     if args.max_grad_norm is not None and args.max_grad_norm > 0:
@@ -421,11 +423,6 @@ class CustomTrainer(Trainer):
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
 
-            all_loss = np.concatenate(all_loss, axis=0)
-
-            self.gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
-            self.gmm.fit(all_loss)
-
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
 
@@ -438,7 +435,8 @@ class CustomTrainer(Trainer):
 
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
-            logger.info(f"Loading best model from {self.state.best_model_checkpoint} (score: {self.state.best_metric}).")
+            logger.info(
+                f"Loading best model from {self.state.best_model_checkpoint} (score: {self.state.best_metric}).")
 
             # We load the model state dict on the CPU to avoid an OOM error.
             state_dict = torch.load(os.path.join(self.state.best_model_checkpoint, WEIGHTS_NAME), map_location="cpu")
@@ -461,7 +459,8 @@ class CustomTrainer(Trainer):
         return TrainOutput(self.state.global_step, self._total_loss_scalar / self.state.global_step, metrics)
 
     def prediction_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], prediction_loss_only: bool,
-    ignore_keys: Optional[List[str]] = None) -> Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
+                        ignore_keys: Optional[List[str]] = None) -> Tuple[
+        Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform an evaluation step on :obj:`model` using obj:`inputs`.
 

@@ -84,6 +84,7 @@ class CustomTrainer(Trainer):
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
         return (loss, outputs) if return_outputs else loss
+
     def get_clean(self, model, inputs):
         with torch.no_grad():
             if self.label_smoother is not None and "labels" in inputs:
@@ -91,19 +92,19 @@ class CustomTrainer(Trainer):
             else:
                 labels = None
 
-            outputs = model(**inputs)
+                outputs = model(**inputs)
 
             if self.args.past_index >= 0:
                 self._past = outputs[self.args.past_index]
                 # outputs 으로부터 logits (예측값 구함)
-        logits = outputs['logits']
+        logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
         # inputs 으로부터 정답을 구함
-        labels = inputs.get("labels")
+        labels = inputs['labels']
 
         # 각 샘플별 로스를 계산
         CE = nn.CrossEntropyLoss(reduction='none')
         loss = CE(logits, labels)
-        loss = loss.cpu().detach().numpy()
+        loss = loss.cpu().numpy()
         #loss = labels - logits
         #if labels is not None:
         #    loss = self.label_smoother(outputs, labels)
@@ -111,17 +112,42 @@ class CustomTrainer(Trainer):
         #    loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
         loss = loss.reshape(-1, 1)
         # gmm
-        gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
-        gmm.fit(loss)
+        #gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
+        #gmm.fit(loss)
 
         # prob
-        prob = gmm.predict_proba(loss)
-        prob = prob[:, gmm.means_.argmin()]
+        prob = self.gmm.predict_proba(loss)
+        prob = prob[:, self.gmm.means_.argmin()]
 
         clean_inputs = {}
         for k, v in inputs.items():
             clean_inputs[k] = v[prob > self.args.p_threshold]
+
         return clean_inputs
+
+    def get_loss(self, model, inputs):
+        with torch.no_grad():
+            if self.label_smoother is not None and "labels" in inputs:
+                labels = inputs.pop("labels")
+            else:
+                labels = None
+
+                outputs = model(**inputs)
+            if self.args.past_index >= 0:
+                self._past = outputs[self.args.past_index]
+                # outputs 으로부터 logits (예측값 구함)
+
+        logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
+        # inputs 으로부터 정답을 구함
+        labels = inputs['labels']
+
+        # 각 샘플별 로스를 계산
+        CE = nn.CrossEntropyLoss(reduction='none')
+        loss = CE(logits, labels)
+        loss = loss.cpu().numpy()
+        loss = loss.reshape(-1, 1)
+
+        return loss
 
     def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], cur_epoch=-1) -> torch.Tensor:
         """
@@ -343,7 +369,10 @@ class CustomTrainer(Trainer):
             steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
+            all_loss = []
             for step, inputs in enumerate(epoch_iterator):
+                loss = self.get_loss(model, inputs)
+                all_loss.append(loss)
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -391,6 +420,11 @@ class CustomTrainer(Trainer):
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
+
+            all_loss = np.concatenate(all_loss, axis=0)
+
+            self.gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
+            self.gmm.fit(all_loss)
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)

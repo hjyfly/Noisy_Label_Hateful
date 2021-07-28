@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 
 from typing import Optional, Tuple
+
+from sklearn.mixture import GaussianMixture
 from tqdm.auto import tqdm
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from transformers.integrations import hp_params
@@ -82,7 +84,39 @@ class CustomTrainer(Trainer):
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
         return (loss, outputs) if return_outputs else loss
-        
+
+    def get_clean(self, model, inputs):
+        with torch.no_grad():
+            if self.label_smoother is not None and "labels" in inputs:
+                labels = inputs.pop("labels")
+            else:
+                labels = None
+
+            outputs = model(**inputs)
+
+            if self.args.past_index >= 0:
+                self._past = outputs[self.args.past_index]
+                # outputs 으로부터 logits (예측값 구함)
+        logits = outputs['logits']
+        # inputs 으로부터 정답을 구함
+        labels = inputs['label']
+
+        # 각 샘플별 로스를 계산
+        loss = labels - logits
+
+        # gmm
+        gmm = GaussianMixture(n_components=2, max_iter=10, tol=1e-2, reg_covar=5e-4)
+        gmm.fit(loss)
+
+        # prob
+        prob = gmm.predict_proba(loss)
+        prob = prob[:, gmm.means_.argmin()]
+
+        clean_inputs = {}
+        for k, v in inputs.Items():
+            clean_inputs[k] = v[prob > self.args.p_threshold]
+        return clean_inputs
+
     def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], cur_epoch=-1) -> torch.Tensor:
         """
         Perform a training step on a batch of inputs.
@@ -103,6 +137,9 @@ class CustomTrainer(Trainer):
         """
         model.train()
         inputs = self._prepare_inputs(inputs)
+
+        if self.args.p_threshold >0:
+            inputs = self.get_clean(model, inputs)
 
         loss = self.compute_loss(model, inputs)
 

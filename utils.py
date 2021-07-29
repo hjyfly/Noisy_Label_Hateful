@@ -158,7 +158,7 @@ class CustomTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.args.p_threshold > 0 and cur_epoch > 2:
+        if self.args.p_threshold > 0:
           inputs = self.get_clean(model, inputs)
 
         loss = self.compute_loss(model, inputs)
@@ -354,7 +354,8 @@ class CustomTrainer(Trainer):
             if args.past_index >= 0:
                 self._past = None
 
-            steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
+            steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized
+                              else args.max_steps * args.gradient_accumulation_steps)
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             all_loss = []
@@ -363,7 +364,7 @@ class CustomTrainer(Trainer):
               all_loss.append(loss)
             all_loss = np.concatenate(all_loss, axis=0)
 
-            self.gmm = GaussianMixture(n_components=3,max_iter=10,tol=1e-2,reg_covar=5e-4)
+            self.gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
             self.gmm.fit(all_loss)
 
             for step, inputs in enumerate(epoch_iterator):

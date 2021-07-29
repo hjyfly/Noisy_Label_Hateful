@@ -13,10 +13,10 @@ from tqdm.auto import tqdm
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from transformers.integrations import hp_params
 
+from sklearn.mixture import GaussianMixture
+
 import math
 import time
-
-from torch.cuda.amp import autocast
 
 from transformers import Trainer
 from transformers.utils import logging
@@ -69,29 +69,74 @@ class CustomTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
-      
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
             labels = None
-        #outputs = model(**inputs)
+        outputs = model(**inputs)
 
         if self.args.past_index >= 0:
             self._past = outputs[self.args.past_index]
 
-        if self.use_amp:
-          with autocast():
-              outputs = model(**inputs)
-        else:
-          outputs = model(**inputs)
-
         if labels is not None:
-          loss = self.label_smoother(outputs, labels).mean().detach()
+            loss = self.label_smoother(outputs, labels)
         else:
-          loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
         return (loss, outputs) if return_outputs else loss
         
+    def get_loss(self, model, inputs):
+      model.train()
+      inputs = self._prepare_inputs(inputs)
+
+      with torch.no_grad():
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs["labels"]
+        else:
+            labels = None
+        outputs = model(**inputs)
+
+        if self.args.past_index >= 0:
+          self._past = outputs[self.args.past_index]
+
+        logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
+        if labels is None:
+          labels = inputs["labels"]
+        
+        CE = nn.CrossEntropyLoss(reduction='none')
+        loss = CE(logits, labels).cpu().numpy().reshape(-1,1)
+
+      return loss
+
+    def get_clean(self, model, inputs):
+      
+      with torch.no_grad():
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs["labels"]
+        else:
+            labels = None
+        outputs = model(**inputs)
+
+        if self.args.past_index >= 0:
+          self._past = outputs[self.args.past_index]
+
+      
+      CE = nn.CrossEntropyLoss(reduction='none')
+      logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
+      if labels is None:
+          labels = inputs["labels"]
+
+      loss = CE(logits, labels).cpu().numpy().reshape(-1,1)
+
+      prob = self.gmm.predict_proba(loss) 
+      prob = prob[:,self.gmm.means_.argmin()]
+
+      clean_inputs = {}
+      for k, v in inputs.items():
+        clean_inputs[k] = v[prob > self.args.p_threshold]
+
+      return clean_inputs
+
     def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], cur_epoch=-1) -> torch.Tensor:
         """
         Perform a training step on a batch of inputs.
@@ -113,11 +158,10 @@ class CustomTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.use_amp:
-            with autocast():
-                loss = self.compute_loss(model, inputs)
-        else:
-            loss = self.compute_loss(model, inputs)
+        if self.args.p_threshold > 0 and cur_epoch > 2:
+          inputs = self.get_clean(model, inputs)
+
+        loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -125,12 +169,7 @@ class CustomTrainer(Trainer):
         if self.args.gradient_accumulation_steps > 1:
             loss = loss / self.args.gradient_accumulation_steps
 
-        self.scaler = torch.cuda.amp.GradScaler()
-
-        if self.use_amp:
-            self.scaler.scale(loss).backward()
-        else:
-           loss.backward()
+        loss.backward()
 
         return loss.detach()
         
@@ -318,6 +357,15 @@ class CustomTrainer(Trainer):
             steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
+            all_loss = []
+            for step, inputs in enumerate(epoch_iterator):
+              loss = self.get_loss(model, inputs)
+              all_loss.append(loss)
+            all_loss = np.concatenate(all_loss, axis=0)
+
+            self.gmm = GaussianMixture(n_components=3,max_iter=10,tol=1e-2,reg_covar=5e-4)
+            self.gmm.fit(all_loss)
+
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -334,9 +382,6 @@ class CustomTrainer(Trainer):
 
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
-                
-                #option 변경
-                self.use_amp = True
 
                 tr_loss += self.custom_training_step(model, inputs)
 
@@ -350,23 +395,11 @@ class CustomTrainer(Trainer):
                 ):
                     # Gradient clipping
                     if args.max_grad_norm is not None and args.max_grad_norm > 0:
-                        if self.use_amp:
-                            # AMP: gradients need unscaling
-                            self.scaler.unscale_(self.optimizer)
-
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
                     # Optimizer step
-                    optimizer_was_run = False
-
-                    if self.use_amp:
-                        scale_before = self.scaler.get_scale()
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        scale_after = self.scaler.get_scale()
-                        optimizer_was_run = scale_before <= scale_after
-                    else:
-                        self.optimizer.step()
+                    optimizer_was_run = True
+                    self.optimizer.step()
 
                     if optimizer_was_run:
                         self.lr_scheduler.step()
@@ -450,6 +483,14 @@ class CustomTrainer(Trainer):
             else:
                 ignore_keys = []
 
+        # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
+        if has_labels:
+            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
+            if len(labels) == 1:
+                labels = labels[0]
+        else:
+            labels = None
+
         with torch.no_grad():
             if has_labels:
                 loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
@@ -475,12 +516,5 @@ class CustomTrainer(Trainer):
         logits = nested_detach(logits)
         if len(logits) == 1:
             logits = logits[0]
-
-        if has_labels:
-            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
-            if len(labels) == 1:
-                labels = labels[0]
-        else:
-            labels = None
 
         return (loss, logits, labels)

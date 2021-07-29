@@ -109,7 +109,6 @@ class CustomTrainer(Trainer):
       return loss
 
     def get_clean(self, model, inputs):
-      
       with torch.no_grad():
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs["labels"]
@@ -130,7 +129,7 @@ class CustomTrainer(Trainer):
 
       prob = self.gmm.predict_proba(loss) 
       prob = prob[:,self.gmm.means_.argmin()]
-
+      #logger.error(prob)
       clean_inputs = {}
       for k, v in inputs.items():
         clean_inputs[k] = v[prob > self.args.p_threshold]
@@ -158,7 +157,7 @@ class CustomTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.args.p_threshold > 0:
+        if self.args.p_threshold > 0 and cur_epoch > 2:
           inputs = self.get_clean(model, inputs)
 
         loss = self.compute_loss(model, inputs)
@@ -354,8 +353,7 @@ class CustomTrainer(Trainer):
             if args.past_index >= 0:
                 self._past = None
 
-            steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized
-                              else args.max_steps * args.gradient_accumulation_steps)
+            steps_in_epoch = (len(epoch_iterator) if train_dataset_is_sized else args.max_steps * args.gradient_accumulation_steps)
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
             all_loss = []
@@ -384,7 +382,7 @@ class CustomTrainer(Trainer):
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
-                tr_loss += self.custom_training_step(model, inputs)
+                tr_loss += self.custom_training_step(model, inputs, epoch)
 
                 self.current_flos += float(self.floating_point_ops(inputs))
 

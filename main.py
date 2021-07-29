@@ -36,7 +36,7 @@ if __name__ == '__main__':
     parser.add_argument('--wr', default=0.0, type=float, help='Warm-up ratio')
     parser.add_argument('--wd', default=0.01, type=float, help='Weight decay coefficient')
     parser.add_argument('--batch_size', default=8, type=int, help='Batch size [8, 16, 32]')
-    parser.add_argument('--total_epochs', default=1, type=int, help='Number of epochs')
+    parser.add_argument('--total_epochs', default=10, type=int, help='Number of epochs')
     parser.add_argument('--mixup', default=False, type=str2bool, help="Mixup Method")
     parser.add_argument('--label_smoothing', default=0.0, type=float, help="Label smoothing factor")
     parser.add_argument('--p_threshold', default=0.5, type=float, help="MentorNet")
@@ -107,7 +107,7 @@ if __name__ == '__main__':
         output_dir=p_args.output_dir, evaluation_strategy='epoch', learning_rate=p_args.lr,
         per_device_train_batch_size=p_args.batch_size, per_device_eval_batch_size=p_args.batch_size,
         num_train_epochs=p_args.total_epochs, weight_decay=p_args.wd, load_best_model_at_end=True, save_strategy='epoch',
-        warmup_ratio=p_args.wr, seed=p_args.seed, save_total_limit=1,
+        warmup_ratio=p_args.wr, seed=p_args.seed, save_total_limit=1, metric_for_best_model="eval_f1",
         logging_strategy="no", label_smoothing_factor=p_args.label_smoothing
     )
 
@@ -126,7 +126,7 @@ if __name__ == '__main__':
 
     trainer.train()
     trainer.evaluate()
-    trainer.predict(test_dataset)
+    predict_result = trainer.predict(test_dataset)
 
     log_history = trainer.state.log_history
 
@@ -159,7 +159,8 @@ if __name__ == '__main__':
         result = {
             'seed': p_args.seed,
             'time': elapsed_time,
-            'results': log_history,
+            'train_results': log_history,
+            'test_results': predict_result[2],
         }
 
         json.dump(result, f, indent=2)

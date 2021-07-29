@@ -69,7 +69,6 @@ class CustomTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
-        
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -85,26 +84,27 @@ class CustomTrainer(Trainer):
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
         return (loss, outputs) if return_outputs else loss
-    
+        
     def get_loss(self, model, inputs):
       model.train()
       inputs = self._prepare_inputs(inputs)
 
       with torch.no_grad():
         if self.label_smoother is not None and "labels" in inputs:
-            labels = inputs.pop("labels")
+            labels = inputs["labels"]
         else:
             labels = None
-            outputs = model(**inputs)
+        outputs = model(**inputs)
 
         if self.args.past_index >= 0:
           self._past = outputs[self.args.past_index]
 
         logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
-        labels = inputs["labels"]
+        if labels is None:
+          labels = inputs["labels"]
         
         CE = nn.CrossEntropyLoss(reduction='none')
-        loss = CE(logits, labels).cpu().detach().numpy().reshape(-1,1)
+        loss = CE(logits, labels).cpu().numpy().reshape(-1,1)
 
       return loss
 
@@ -112,24 +112,23 @@ class CustomTrainer(Trainer):
       
       with torch.no_grad():
         if self.label_smoother is not None and "labels" in inputs:
-            labels = inputs.pop("labels")
+            labels = inputs["labels"]
         else:
             labels = None
-            outputs = model(**inputs)
+        outputs = model(**inputs)
 
         if self.args.past_index >= 0:
           self._past = outputs[self.args.past_index]
 
       
       CE = nn.CrossEntropyLoss(reduction='none')
-      logits = outputs['logits']
-      labels = inputs.get("labels")
-      loss = CE(logits, labels)
+      logits = outputs['logits'] if isinstance(outputs, dict) else outputs[1]
+      if labels is None:
+          labels = inputs["labels"]
 
-      input_loss = loss.cpu().detach().numpy() 
-      input_loss = input_loss.reshape(-1,1)
+      loss = CE(logits, labels).cpu().numpy().reshape(-1,1)
 
-      prob = self.gmm.predict_proba(input_loss) 
+      prob = self.gmm.predict_proba(loss) 
       prob = prob[:,self.gmm.means_.argmin()]
 
       clean_inputs = {}
@@ -137,7 +136,6 @@ class CustomTrainer(Trainer):
         clean_inputs[k] = v[prob > self.args.p_threshold]
 
       return clean_inputs
-      
 
     def custom_training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], cur_epoch=-1) -> torch.Tensor:
         """
